@@ -4,7 +4,8 @@ import { db } from "@/db";
 // Until the roofing workflow and callback round trip pass QA, managed
 // contacts go to the operator inbox. Native phone-based bots must not run.
 export async function aurixSmsHold(orgId: string, phone: string) {
-  if (process.env.AURIX_INGRESS_ENABLED !== "true") return null;
+  // The ingress kill switch must not release existing managed contacts to bots.
+  // Migration 0079 is required before deploying this route.
   const result = await db.execute(sql`
     SELECT contact_id FROM aurix_lead_links WHERE org_id=${orgId}::uuid AND phone=${phone}
   `);

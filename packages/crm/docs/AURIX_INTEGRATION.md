@@ -77,6 +77,9 @@ end-to-end behavior. Full Seldon CI and build results must be inspected separate
 
 ## Pause and rollback
 
+Apply migration 0079 before deploying the updated Twilio route. Managed-contact
+SMS holds remain enforced even when ingress is disabled.
+
 Disable `AURIX_INGRESS_ENABLED` to reject ingress without deleting state. Pause the
 installation to reject new transactional acceptance. Preserve inbox/link rows for
 diagnosis. Never delete replay rows to force a retry. The rollback removes integration
