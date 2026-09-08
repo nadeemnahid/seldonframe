@@ -279,7 +279,15 @@ export async function POST(request: Request) {
   // Only verified provider START/UNSTOP is explicit opt-in. Plain lead sync is not.
   if (["START", "UNSTOP"].includes(inboundBody.toUpperCase())) {
     const { verifiedOptIn } = await import("@/lib/aurix/inbound");
-    await verifiedOptIn(orgId, fromNumber, externalMessageId);
+    try {
+      await verifiedOptIn(orgId, fromNumber, externalMessageId, {accountSid:body.AccountSid ?? "",to:toNumber,authToken});
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "";
+      if (/invalid.*consent|stale_consent|invalid_provider_identity/.test(code)) {
+        return NextResponse.json({ok:true,action:"opt_in_rejected_suppression_preserved"});
+      }
+      return NextResponse.json({error:"consent_verification_unavailable"},{status:503});
+    }
     return NextResponse.json({ ok: true, action: "explicit_opt_in_recorded" });
   }
   // Managed identities never reach native phone-based fan-out, including while paused.

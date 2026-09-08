@@ -53,3 +53,12 @@ test('only final identity-matched acknowledgements release callback ordering',()
  for(const patch of [{status:'already_received'},{event_id:'other'},{message_id:'other'},{status:'success'}]) assert.equal(callbackAcknowledgement({...ack,...patch},'e1').accepted,false);
  assert.equal(callbackAcknowledgement(null,'e1').accepted,false);
 });
+
+import { consentFromProvider } from '../../src/lib/aurix/consent';
+test('explicit opt-in uses original provider time and validates exact sender/recipient/message',()=>{
+ const now=Date.parse('2026-09-08T15:00:00Z');
+ const expected={accountSid:'ACtest',messageId:'SMtest',from:'+12025550123',to:'+12025550124'};
+ const message={sid:expected.messageId,account_sid:expected.accountSid,from:expected.from,to:expected.to,direction:'inbound',body:'START',date_created:new Date(now-1000).toUTCString()};
+ assert.equal(consentFromProvider(message,expected,now).captured_at,'2026-09-08T14:59:59.000Z');
+ for(const patch of [{date_created:new Date(now-301000).toUTCString()},{date_created:new Date(now+1000).toUTCString()},{from:'+19999999999'},{direction:'outbound-api'},{body:'hello'},{sid:'other'}]) assert.throws(()=>consentFromProvider({...message,...patch},expected,now));
+});

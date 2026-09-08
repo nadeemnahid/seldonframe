@@ -28,9 +28,10 @@ export async function managedInbound(input: { orgId: string; fromNumber: string;
   return true;
 }
 
-export async function verifiedOptIn(orgId: string, phone: string, messageId: string) {
+export async function verifiedOptIn(orgId: string, phone: string, messageId: string, provider: {accountSid:string;to:string;authToken:string}) {
   // Provider retries must reuse the stored evidence timestamp.
   const old = await db.execute(sql`SELECT evidence FROM aurix_consent_receipts WHERE org_id=${orgId}::uuid AND receipt_id=${messageId}`);
-  const evidence = old.rows[0]?.evidence ?? {status:'allowed',explicit:true,captured_at:new Date().toISOString(),source:'twilio_verified_start'};
+  const { fetchConsentEvidence } = await import('./consent');
+  const evidence = old.rows[0]?.evidence ?? await fetchConsentEvidence({...provider,messageId,from:phone});
   await db.execute(sql`SELECT aurix_explicit_opt_in(${orgId}::uuid,${messageId},${phone},${JSON.stringify(evidence)}::jsonb)`);
 }

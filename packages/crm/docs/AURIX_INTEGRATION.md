@@ -28,7 +28,8 @@ Aurix remains canonical for qualification, appointments, revenue and conversions
 - Verified missed-call callbacks record an exact identity when resolvable; ambiguous
   shared-phone calls cause handoffs rather than guessed lead attribution.
 - Managed inbound SMS bypasses native phone-matched bots. STOP cancels the run and
-  persists suppression. Verified START/UNSTOP stores explicit consent evidence.
+  persists suppression. Verified START/UNSTOP fetches the original Twilio message timestamp and validates
+  its account, sender, recipient and message ID before storing consent evidence.
   Replaying an old START after a later STOP cannot clear suppression. Generic
   suppression deletion is rejected for managed phones.
 - Automatic local Seldon booking requires a delivered Aurix canonical-qualified
