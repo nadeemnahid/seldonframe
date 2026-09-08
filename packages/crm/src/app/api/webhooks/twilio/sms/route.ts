@@ -258,6 +258,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, skipped: "empty_body" });
   }
 
+  const { aurixSchemaReady } = await import("@/lib/aurix/schema-ready");
+  await aurixSchemaReady();
+
   // STOP keyword: auto-suppress the sender and acknowledge without
   // routing through the runtime. Carriers require this — replying with
   // marketing content to a STOP is a violation.
@@ -280,7 +283,8 @@ export async function POST(request: Request) {
   if (["START", "UNSTOP"].includes(inboundBody.toUpperCase())) {
     const { verifiedOptIn } = await import("@/lib/aurix/inbound");
     try {
-      await verifiedOptIn(orgId, fromNumber, externalMessageId, {accountSid:body.AccountSid ?? "",to:toNumber,authToken});
+      const handled = await verifiedOptIn(orgId, fromNumber, externalMessageId, {accountSid:body.AccountSid ?? "",to:toNumber,authToken});
+      if (handled) return NextResponse.json({ ok: true, action: "explicit_opt_in_recorded" });
     } catch (error) {
       const code = error instanceof Error ? error.message : "";
       if (/invalid.*consent|stale_consent|invalid_provider_identity/.test(code)) {
@@ -288,7 +292,6 @@ export async function POST(request: Request) {
       }
       return NextResponse.json({error:"consent_verification_unavailable"},{status:503});
     }
-    return NextResponse.json({ ok: true, action: "explicit_opt_in_recorded" });
   }
   // Managed identities never reach native phone-based fan-out, including while paused.
   const { managedInbound } = await import("@/lib/aurix/inbound");

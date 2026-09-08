@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import { db } from '@/db';
+import { aurixSchemaReady } from './schema-ready';
 
 export async function managedSmsGuard(orgId: string, contactId: string | null, phone: string) {
+  if (!await aurixSchemaReady()) return null;
   const result = await db.execute(sql`SELECT l.contact_id,l.phone,l.workflow_state,l.context,l.consent_override,i.status,i.config
     FROM aurix_lead_links l JOIN aurix_installations i ON i.id=l.installation_id
     WHERE l.org_id=${orgId}::uuid AND (l.phone=${phone} OR l.contact_id=${contactId}::uuid)`);
@@ -16,6 +18,7 @@ export async function managedSmsGuard(orgId: string, contactId: string | null, p
 }
 
 export async function aurixSmsHold(orgId: string, phone: string) {
+  if (!await aurixSchemaReady()) return null;
   const result = await db.execute(sql`SELECT contact_id,workflow_run_id,workflow_state FROM aurix_lead_links WHERE org_id=${orgId}::uuid AND phone=${phone}`);
   if (!result.rows.length) return null;
   const contactId = result.rows.length === 1 && typeof result.rows[0].contact_id === 'string' ? result.rows[0].contact_id : null;

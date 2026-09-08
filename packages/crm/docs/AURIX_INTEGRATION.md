@@ -67,8 +67,10 @@ These machine integration routes are intentionally separate from generic MCP too
 
 1. Create an isolated Seldon staging app and database with a real workspace.
 2. Validate the full historical migration chain, then 0079 and 0080, including
-   cloud role grants. Apply migrations before routing traffic to the updated SMS,
-   voice and workflow handlers; these paths depend on the new tables.
+   cloud role grants. Deploy code with all integration flags off, then apply the
+   migrations. Before any integration tables exist, native routes remain usable.
+   A partially installed integration fails closed until both migrations exist.
+   Once installed, managed holds remain enforced even with flags off.
 3. Configure `ENCRYPTION_KEY`, authentication, and a nonempty `CRON_SECRET`.
    The existing workflow cron now rejects requests if its secret is missing.
 4. Set `AURIX_CALLBACK_HOSTS` to the exact permitted Aurix hostname, without scheme.

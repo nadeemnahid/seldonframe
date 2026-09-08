@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/db';
+import { aurixSchemaReady } from './schema-ready';
 import type { AgentTool, ToolExecuteContext } from '@/lib/agents/tools';
 import { executeVoiceToolCall } from '@/lib/agents/voice/realtime-tools';
 import { roofingEvidence, services, roles, timelines } from './roofing';
@@ -8,7 +9,7 @@ import { queueEvent } from './callbacks';
 
 const schema=z.object({service_type:z.enum(services),decision_role:z.enum(roles),postal_code:z.string(),timeline:z.enum(timelines),storm_related:z.string(),insurance_status:z.string(),preferred_start:z.string(),handoff:z.enum(['yes','no']),confidence:z.enum(['high','low']),summary:z.string().max(1000)});
 export async function aurixVoiceSession(ctx: ToolExecuteContext, callId: string) {
-  if (!ctx.callerPhone) return null;
+  if (!ctx.callerPhone || !await aurixSchemaReady()) return null;
   const rows=await db.execute(sql`SELECT l.installation_id,l.lead_id,i.config FROM aurix_lead_links l JOIN aurix_installations i ON i.id=l.installation_id
     WHERE l.org_id=${ctx.orgId}::uuid AND l.phone=${ctx.callerPhone}`);
   if (!rows.rows.length) return null;
@@ -34,6 +35,7 @@ export async function aurixVoiceSession(ctx: ToolExecuteContext, callId: string)
 }
 
 export async function managedMissedCall(orgId:string,phone:string,callId:string,missed=true) {
+ if (!await aurixSchemaReady()) return false;
  const rows=await db.execute(sql`SELECT installation_id,lead_id FROM aurix_lead_links WHERE org_id=${orgId}::uuid AND phone=${phone}`);
  if (!rows.rows.length) return false;
  if (!missed) return true;

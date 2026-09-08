@@ -4,6 +4,7 @@ import { workflowWaits } from '@/db/schema';
 import { resumeWait } from '@/lib/workflow/runtime';
 import { DrizzleRuntimeStorage } from '@/lib/workflow/storage-drizzle';
 import { makeAgentToolInvoker } from '@/lib/agents/tool-invoker';
+import { aurixSchemaReady } from './schema-ready';
 import { aurixSmsHold } from './sms-hold';
 
 /** Called only after verifying the Twilio signature for the mapped workspace. */
@@ -29,9 +30,13 @@ export async function managedInbound(input: { orgId: string; fromNumber: string;
 }
 
 export async function verifiedOptIn(orgId: string, phone: string, messageId: string, provider: {accountSid:string;to:string;authToken:string}) {
+  if (!await aurixSchemaReady()) return false;
+  const managed = await db.execute(sql`SELECT 1 FROM aurix_lead_links WHERE org_id=${orgId}::uuid AND phone=${phone} LIMIT 1`);
+  if (!managed.rows.length) return false;
   // Provider retries must reuse the stored evidence timestamp.
   const old = await db.execute(sql`SELECT evidence FROM aurix_consent_receipts WHERE org_id=${orgId}::uuid AND receipt_id=${messageId}`);
   const { fetchConsentEvidence } = await import('./consent');
   const evidence = old.rows[0]?.evidence ?? await fetchConsentEvidence({...provider,messageId,from:phone});
   await db.execute(sql`SELECT aurix_explicit_opt_in(${orgId}::uuid,${messageId},${phone},${JSON.stringify(evidence)}::jsonb)`);
+  return true;
 }
