@@ -1,0 +1,57 @@
+name: Fix Historical Replay
+
+on:
+  push:
+    branches:
+      - ops/fix-historical-replay
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pinned integration branch
+        uses: actions/checkout@v6
+        with:
+          ref: feat/aurix-integration-v1
+          fetch-depth: 0
+
+      - name: Verify and patch migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=b7e39ed0916394cb5978672895de3b3a4f251df6
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/crm/drizzle/0001_solid_gateway.sql')
+          text = path.read_text()
+          old = 'ALTER TABLE "accounts" ALTER COLUMN "expires_at" SET DATA TYPE integer;'
+          new = 'ALTER TABLE "accounts" ALTER COLUMN "expires_at" SET DATA TYPE integer USING EXTRACT(EPOCH FROM "expires_at")::integer;'
+
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected exactly one target statement, found {count}')
+
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          git diff --check
+          test "$(git status --short | wc -l | tr -d ' ')" = '1'
+          test "$(git status --short | awk '{print $2}')" = 'packages/crm/drizzle/0001_solid_gateway.sql'
+          grep -F 'ALTER TABLE "accounts" ALTER COLUMN "expires_at" SET DATA TYPE integer USING EXTRACT(EPOCH FROM "expires_at")::integer;' packages/crm/drizzle/0001_solid_gateway.sql
+          git diff -- packages/crm/drizzle/0001_solid_gateway.sql
+
+      - name: Commit repair to integration branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/crm/drizzle/0001_solid_gateway.sql
+          git commit -m 'fix(db): make historical auth expiry migration replayable'
+          git push origin HEAD:feat/aurix-integration-v1
