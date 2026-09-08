@@ -33,9 +33,10 @@ export async function aurixVoiceSession(ctx: ToolExecuteContext, callId: string)
     executeToolCall:(opts:Parameters<typeof executeVoiceToolCall>[0])=>executeVoiceToolCall({...opts,deps:{findTool:name=>name===tool.name?tool:undefined}}) };
 }
 
-export async function managedMissedCall(orgId:string,phone:string,callId:string) {
+export async function managedMissedCall(orgId:string,phone:string,callId:string,missed=true) {
  const rows=await db.execute(sql`SELECT installation_id,lead_id FROM aurix_lead_links WHERE org_id=${orgId}::uuid AND phone=${phone}`);
  if (!rows.rows.length) return false;
+ if (!missed) return true;
  for(const l of rows.rows) if(typeof l.installation_id==='string'&&typeof l.lead_id==='string'){
   // With shared phone identity, record a handoff rather than attribute the call.
   await queueEvent(l.installation_id,l.lead_id,`call:${callId}`,rows.rows.length===1?'call.missed':'handoff.requested',

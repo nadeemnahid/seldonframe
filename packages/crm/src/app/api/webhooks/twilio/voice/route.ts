@@ -236,10 +236,10 @@ export async function POST(request: Request) {
     }
   }
 
-  if (["no-answer", "busy", "failed"].includes(callStatus)) {
-    const { managedMissedCall } = await import("@/lib/aurix/voice");
-    if (await managedMissedCall(orgId, fromNumber, callSid)) return NextResponse.json({ok:true,emitted:"aurix.call.missed"});
-  }
+  const { managedMissedCall } = await import("@/lib/aurix/voice");
+  const managedCall = await managedMissedCall(orgId, fromNumber, callSid, ["no-answer", "busy", "failed"].includes(callStatus));
+  if (managedCall) return callStatus && callStatus !== "ringing" && callStatus !== "in-progress"
+    ? NextResponse.json({ok:true,handled_by:"aurix"}) : twimlResponse(EMPTY_TWIML_RESPONSE);
 
   // 2026-06-10 — Inbound greeting decision, shared by the voice-URL hit and
   // the status callback. When the missed-call agent is deployed we answer +

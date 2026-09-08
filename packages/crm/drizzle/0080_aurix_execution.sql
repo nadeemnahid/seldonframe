@@ -59,7 +59,7 @@ RETURNS text LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
 DECLARE l public.aurix_lead_links%ROWTYPE; i public.aurix_installations%ROWTYPE;
  v_event text; v_raw text; existing public.aurix_callback_outbox%ROWTYPE;
 BEGIN
- SELECT * INTO i FROM public.aurix_installations WHERE id=p_install FOR UPDATE;
+ SELECT * INTO i FROM public.aurix_installations WHERE id=p_install;
  SELECT * INTO l FROM public.aurix_lead_links WHERE installation_id=p_install AND lead_id=p_lead;
  IF NOT FOUND THEN RAISE EXCEPTION 'aurix_identity_conflict'; END IF;
  IF p_type NOT IN ('qualification.started','qualification.completed','qualification.disqualified',

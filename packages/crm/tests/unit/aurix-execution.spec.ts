@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { callbackHeaders, callbackUrl, deliveryDecision } from '../../src/lib/aurix/callback-policy';
+import { callbackHeaders, callbackUrl, deliveryDecision, callbackAcknowledgement } from '../../src/lib/aurix/callback-policy';
 import { parseHeaders, verify } from '../../src/lib/aurix/protocol';
 import { roofingEvidence, roofingSpec } from '../../src/lib/aurix/roofing';
 import { AgentSpecSchema } from '../../src/lib/agents/validator';
@@ -44,4 +44,12 @@ test('Seldon evidence passes the pinned Aurix parser and yields canonical score 
  const event=parseSeldonEvent({schema_version:'1.0',event_id:'event-1',event_type:'qualification.completed',occurred_at:new Date().toISOString(),
   installation_id:'00000000-0000-4000-8000-000000000001',organization_id:'00000000-0000-4000-8000-000000000002',workspace_id:'workspace',lead_id:'00000000-0000-4000-8000-000000000003',contact_id:'contact',data});
  assert.equal(event.data.workflow_run_id,'run-1');
+});
+
+test('only final identity-matched acknowledgements release callback ordering',()=>{
+ const ack={status:'processed',event_id:'e1',message_id:'e1',result:{canonical_qualified:true}};
+ assert.equal(callbackAcknowledgement(ack,'e1').accepted,true);
+ assert.equal(callbackAcknowledgement({...ack,status:'already_processed'},'e1').accepted,true);
+ for(const patch of [{status:'already_received'},{event_id:'other'},{message_id:'other'},{status:'success'}]) assert.equal(callbackAcknowledgement({...ack,...patch},'e1').accepted,false);
+ assert.equal(callbackAcknowledgement(null,'e1').accepted,false);
 });

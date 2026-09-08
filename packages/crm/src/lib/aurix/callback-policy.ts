@@ -22,3 +22,11 @@ export function deliveryDecision(status: number, attempts: number) {
   if (!transient || attempts >= 12) return { status: 'dead' as const, delaySeconds: 0 };
   return { status: 'retry' as const, delaySeconds: Math.min(3600, 15 * 2 ** Math.min(attempts - 1, 8)) };
 }
+
+export function callbackAcknowledgement(value: unknown, eventId: string) {
+  if (!value || typeof value !== 'object' || !('status' in value) ||
+      !['processed','already_processed'].includes(String(value.status)) ||
+      !('event_id' in value) || value.event_id !== eventId ||
+      !('message_id' in value) || value.message_id !== eventId) return {accepted:false,result:null};
+  return {accepted:true,result:'result' in value ? value.result : null};
+}

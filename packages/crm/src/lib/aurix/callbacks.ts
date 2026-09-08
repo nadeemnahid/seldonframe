@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { db } from '@/db';
 import { decryptValue } from '@/lib/encryption';
-import { callbackHeaders, callbackUrl, deliveryDecision } from './callback-policy';
+import { callbackHeaders, callbackUrl, deliveryDecision, callbackAcknowledgement } from './callback-policy';
 
 export async function queueEvent(installationId: string, leadId: string, source: string, type: string, data: Record<string, unknown>) {
   const result = await db.execute(sql`SELECT enqueue_aurix_event(${installationId}::uuid,${leadId}::uuid,${source},${type},${JSON.stringify(data)}::jsonb) AS event_id`);
@@ -52,14 +52,14 @@ export async function callbackTick(limit = 20) {
         const raw = await response.text();
         if (raw.length < 32768) {
           const ack: unknown = JSON.parse(raw);
-          success = Boolean(ack && typeof ack === 'object' && 'status' in ack &&
-            ['processed','already_processed'].includes(String(ack.status)) && 'event_id' in ack && ack.event_id === row.event_id && 'message_id' in ack && ack.message_id === row.event_id);
-          if (success && ack && typeof ack === 'object' && 'result' in ack) acknowledged = ack.result;
+          const receipt = callbackAcknowledgement(ack,row.event_id);
+          success = receipt.accepted; acknowledged = receipt.result;
         }
       }
       if (!success && httpStatus >= 200 && httpStatus < 300) httpStatus = 0;
       if (!success) errorCode = `http_${httpStatus}_unacknowledged`;
     } catch (error) {
+      if (httpStatus >= 200 && httpStatus < 300) httpStatus = 0;
       // Never persist arbitrary exception strings (URLs, payloads or secrets).
       errorCode = error instanceof Error && ['callback_destination_not_allowed','callback_key_or_destination_missing','invalid_outbox_row'].includes(error.message)
         ? error.message : 'network_or_ack_failure';
