@@ -1,0 +1,34 @@
+name: Aurix ingress qualification
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/crm/src/lib/aurix/**'
+      - 'packages/crm/src/app/api/integrations/aurix/**'
+      - 'packages/crm/src/app/api/webhooks/twilio/sms/route.ts'
+      - 'packages/crm/drizzle/0079_aurix_ingress.sql'
+      - 'packages/crm/tests/unit/aurix-ingress.spec.ts'
+      - '.github/workflows/aurix-qualification.yml'
+permissions:
+  contents: read
+jobs:
+  ingress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NODE_OPTIONS: --max-old-space-size=6144
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10.18.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:check-journaled
+      - run: pnpm typecheck
+      - run: cd packages/crm && node --import tsx --test tests/unit/aurix-ingress.spec.ts
+      - run: pnpm build

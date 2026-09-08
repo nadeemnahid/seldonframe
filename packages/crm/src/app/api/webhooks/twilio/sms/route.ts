@@ -223,6 +223,9 @@ export async function POST(request: Request) {
   // are rejected in production (authToken present) but accepted in dev
   // (no token configured) — matches the Resend webhook posture.
   const authToken = await loadTwilioAuthTokenForOrg(orgId);
+  if (!authToken && process.env.AURIX_INGRESS_ENABLED === "true") {
+    return NextResponse.json({ error: "Twilio signature configuration required" }, { status: 503 });
+  }
   if (authToken) {
     const signature = request.headers.get("x-twilio-signature");
     const ok = verifyTwilioSignature({
@@ -271,6 +274,20 @@ export async function POST(request: Request) {
       contactId: null,
     }, { orgId: orgId });
     return NextResponse.json({ ok: true, action: "auto_suppressed" });
+  }
+
+  // Aurix identities never enter the native phone-only automation path.
+  // STOP above remains authoritative; all other inbound content is held
+  // for a person until the dedicated roofing workflow passes QA.
+  if (process.env.AURIX_INGRESS_ENABLED === "true") {
+    const { aurixSmsHold } = await import("@/lib/aurix/sms-hold");
+    const hold = await aurixSmsHold(orgId, fromNumber);
+    if (hold) {
+      await persistInboundSms({ orgId, contactId: hold.contactId, fromNumber, toNumber,
+        body: inboundBody, externalMessageId,
+        metadata: { aurix: { human_hold: true, ambiguous_identity: hold.ambiguous } } });
+      return NextResponse.json({ ok: true, action: "aurix_human_hold" });
+    }
   }
 
   // HELP / INFO keyword (Slice 4): Carriers expect a deterministic
