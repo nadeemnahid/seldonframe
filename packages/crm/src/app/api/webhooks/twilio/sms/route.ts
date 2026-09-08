@@ -223,7 +223,7 @@ export async function POST(request: Request) {
   // are rejected in production (authToken present) but accepted in dev
   // (no token configured) — matches the Resend webhook posture.
   const authToken = await loadTwilioAuthTokenForOrg(orgId);
-  if (!authToken && process.env.AURIX_INGRESS_ENABLED === "true") {
+  if (!authToken) {
     return NextResponse.json({ error: "Twilio signature configuration required" }, { status: 503 });
   }
   if (authToken) {
@@ -276,18 +276,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, action: "auto_suppressed" });
   }
 
-  // Aurix identities never enter the native phone-only automation path.
-  // STOP above remains authoritative; all other inbound content is held
-  // for a person until the dedicated roofing workflow passes QA.
-  if (process.env.AURIX_INGRESS_ENABLED === "true") {
-    const { aurixSmsHold } = await import("@/lib/aurix/sms-hold");
-    const hold = await aurixSmsHold(orgId, fromNumber);
-    if (hold) {
-      await persistInboundSms({ orgId, contactId: hold.contactId, fromNumber, toNumber,
-        body: inboundBody, externalMessageId,
-        metadata: { aurix: { human_hold: true, ambiguous_identity: hold.ambiguous } } });
-      return NextResponse.json({ ok: true, action: "aurix_human_hold" });
-    }
+  // Only verified provider START/UNSTOP is explicit opt-in. Plain lead sync is not.
+  if (["START", "UNSTOP"].includes(inboundBody.toUpperCase())) {
+    const { verifiedOptIn } = await import("@/lib/aurix/inbound");
+    await verifiedOptIn(orgId, fromNumber, externalMessageId);
+    return NextResponse.json({ ok: true, action: "explicit_opt_in_recorded" });
+  }
+  // Managed identities never reach native phone-based fan-out, including while paused.
+  const { managedInbound } = await import("@/lib/aurix/inbound");
+  if (await managedInbound({ orgId, fromNumber, toNumber, body: inboundBody, externalMessageId })) {
+    return NextResponse.json({ ok: true, action: "aurix_managed_inbound" });
   }
 
   // HELP / INFO keyword (Slice 4): Carriers expect a deterministic

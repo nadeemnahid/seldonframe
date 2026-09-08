@@ -218,6 +218,7 @@ export async function POST(request: Request) {
   // Posture matches the SMS webhook: enforce when token is present,
   // skip in dev where the token isn't configured.
   const authToken = await loadTwilioAuthTokenForOrg(orgId);
+  if (!authToken) return NextResponse.json({error:"Twilio signature configuration required"},{status:503});
   if (authToken) {
     const signature = request.headers.get("x-twilio-signature");
     const ok = verifyTwilioSignature({
@@ -233,6 +234,11 @@ export async function POST(request: Request) {
       });
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
+  }
+
+  if (["no-answer", "busy", "failed"].includes(callStatus)) {
+    const { managedMissedCall } = await import("@/lib/aurix/voice");
+    if (await managedMissedCall(orgId, fromNumber, callSid)) return NextResponse.json({ok:true,emitted:"aurix.call.missed"});
   }
 
   // 2026-06-10 — Inbound greeting decision, shared by the voice-URL hit and

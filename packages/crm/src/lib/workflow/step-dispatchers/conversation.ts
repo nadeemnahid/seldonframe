@@ -431,13 +431,14 @@ async function sendSmsReply(
   body: string,
 ): Promise<void> {
   const { sendSmsFromApi } = await import("@/lib/sms/api");
-  await sendSmsFromApi({
+  const sent = await sendSmsFromApi({
     orgId,
     userId: null,
     contactId,
     toNumber,
     body,
   });
+  if (sent.suppressed) throw new Error("sms_suppressed");
 }
 
 export async function dispatchConversation(
@@ -479,6 +480,12 @@ export async function dispatchConversation(
   // buildRunContext, so no per-dispatch toE164 needed.
   const e164Phone = phoneNumber;
 
+  if (run.archetypeId === "aurix-roofing-v1") {
+    const { managedSmsGuard } = await import("@/lib/aurix/sms-hold");
+    const reason = await managedSmsGuard(run.orgId, contactId, e164Phone);
+    if (reason) return { kind: "fail", reason };
+  }
+  const replyIdentity = run.archetypeId === "aurix-roofing-v1" ? { contactId } : { phone: e164Phone };
   const state = getState(run, step.id);
   const stateKey = STATE_KEY_PREFIX + step.id;
 
@@ -534,7 +541,7 @@ export async function dispatchConversation(
       return {
         kind: "pause_event",
         eventType: "sms.replied",
-        matchPredicate: { phone: e164Phone },
+        matchPredicate: replyIdentity,
         timeoutAt: new Date(Date.now() + NUDGED_TIMEOUT_MINUTES * 60 * 1000),
         onResumeNext: step.id,
         onResumeCapture: "__lastInboundSmsId",
@@ -640,7 +647,7 @@ export async function dispatchConversation(
       return {
         kind: "pause_event",
         eventType: "sms.replied",
-        matchPredicate: { phone: e164Phone },
+        matchPredicate: replyIdentity,
         timeoutAt: new Date(Date.now() + ACTIVE_TIMEOUT_MINUTES * 60 * 1000),
         onResumeNext: step.id,
         onResumeCapture: "__lastInboundSmsId",
@@ -658,7 +665,7 @@ export async function dispatchConversation(
     return {
       kind: "pause_event",
       eventType: "sms.replied",
-      matchPredicate: { phone: e164Phone },
+      matchPredicate: replyIdentity,
       // 2026-05-18 — first wait is the short 6h tier. If the customer
       // doesn't reply, the cron sweeps the wait, resumeWait re-dispatches
       // with __conversationTimeout=true, and the silence-handling
@@ -814,7 +821,7 @@ export async function dispatchConversation(
   return {
     kind: "pause_event",
     eventType: "sms.replied",
-    matchPredicate: { phone: e164Phone },
+    matchPredicate: replyIdentity,
     // Mid-conversation re-pause uses the same 6h active tier as the
     // first pause. Customer just sent something a moment ago, so 6h
     // of further silence is a real signal worth nudging on.

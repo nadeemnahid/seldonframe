@@ -78,6 +78,9 @@ export async function sendSmsFromApi(params: {
     throw new Error("toNumber is required");
   }
 
+  const { managedSmsGuard } = await import("@/lib/aurix/sms-hold");
+  const managedHold = await managedSmsGuard(params.orgId, params.contactId, toNumber);
+  if (managedHold) return { smsId: null, contactId: params.contactId, suppressed: true, reason: managedHold };
   const suppression = await isPhoneSuppressed(params.orgId, toNumber);
   if (suppression) {
     await emitSeldonEvent("sms.suppressed", {

@@ -6,7 +6,11 @@ on:
       - 'packages/crm/src/lib/aurix/**'
       - 'packages/crm/src/app/api/integrations/aurix/**'
       - 'packages/crm/src/app/api/webhooks/twilio/sms/route.ts'
-      - 'packages/crm/drizzle/0079_aurix_ingress.sql'
+      - 'packages/crm/drizzle/**'
+      - 'packages/crm/src/lib/workflow/**'
+      - 'packages/crm/src/lib/agents/**'
+      - 'packages/crm/tests/integration/aurix*'
+      - 'packages/crm/tests/unit/aurix*'
       - 'packages/crm/tests/unit/aurix-ingress.spec.ts'
       - '.github/workflows/aurix-qualification.yml'
 permissions:
@@ -30,5 +34,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm db:check-journaled
       - run: pnpm typecheck
-      - run: cd packages/crm && node --import tsx --test tests/unit/aurix-ingress.spec.ts
+      - run: cd packages/crm && node --import tsx --test tests/unit/aurix-*.spec.ts
+      - name: Install isolated PostgreSQL test runtime
+        run: npm install --prefix /tmp/aurix-test-db --ignore-scripts --no-audit --no-fund @electric-sql/pglite@0.3.14
+      - name: Validate integration migrations, transactions and rollback
+        run: cd packages/crm && AURIX_TEST_DB_ROOT=/tmp/aurix-test-db node --import tsx --test tests/integration/aurix-database.spec.mjs
       - run: pnpm build
