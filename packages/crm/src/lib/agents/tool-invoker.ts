@@ -80,6 +80,11 @@ export type ToolHandler = (
 ) => Promise<unknown>;
 
 const TOOL_HANDLERS: Record<string, ToolHandler> = {
+  aurix_report_roofing: async (orgId, args, runContext) => {
+    if (!runContext) throw new Error("aurix_run_context_required");
+    const { reportRoofing } = await import("@/lib/aurix/execution");
+    return reportRoofing(orgId, runContext.runId, args);
+  },
   create_activity: async (orgId, args, runContext) => {
     // 2026-05-19 — RunContext is the canonical source for contactId.
     // We still accept args.contact_id as a fallback so future archetypes

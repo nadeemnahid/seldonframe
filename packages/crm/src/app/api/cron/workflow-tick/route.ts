@@ -59,10 +59,11 @@ import {
 } from "@/lib/workflow/approvals";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 function isAuthorized(request: Request) {
   const configuredSecret = process.env.CRON_SECRET;
-  if (!configuredSecret) return true;
+  if (!configuredSecret) return false;
   const authHeader = request.headers.get("authorization");
   if (authHeader === `Bearer ${configuredSecret}`) return true;
   const cronHeader = request.headers.get("x-cron-secret");
@@ -252,8 +253,11 @@ export async function GET(request: Request) {
     });
   }
 
+  const { aurixTick } = await import("@/lib/aurix/execution");
+  const aurix = await aurixTick();
   return NextResponse.json({
     ok: true,
+    aurix,
     tickMs: Date.now() - startedAt,
     scanned: dueWaits.length,
     claimed,

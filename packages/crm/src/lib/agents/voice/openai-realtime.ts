@@ -576,10 +576,13 @@ export async function runVoiceCall(params: {
   // resolved. The persona defaults to the SDR script when tools are live.
   const toolContext = params.toolContext;
   const toolsEnabled = Boolean(toolContext);
-  const executeToolCall = params.executeToolCall ?? defaultExecuteVoiceToolCall;
+  const aurix = toolContext && !params.WebSocketImpl
+    ? await (await import("@/lib/aurix/voice")).aurixVoiceSession(toolContext, params.callId) : null;
+  const activeTools = aurix?.tools ?? VOICE_TOOLS;
+  const executeToolCall = aurix?.executeToolCall ?? params.executeToolCall ?? defaultExecuteVoiceToolCall;
   const hangup = params.hangupImpl ?? hangupCall;
   const instructions =
-    params.instructions ??
+    aurix?.instructions ?? params.instructions ??
     (toolsEnabled ? VOICE_SDR_INSTRUCTIONS : PHASE0_GREETING_INSTRUCTIONS);
 
   // Open the control WS with the `ws` package's `new WebSocket(url, options)`
@@ -890,14 +893,14 @@ export async function runVoiceCall(params: {
       if (toolsEnabled) {
         // 6 tools (provide_faq_answer excluded). tool_choice "auto" lets the
         // model decide when to call them.
-        session.tools = toRealtimeFunctionTools(VOICE_TOOLS);
+        session.tools = toRealtimeFunctionTools(activeTools);
         session.tool_choice = "auto";
       }
       send({ type: "session.update", session });
       logEvent("voice_call_session_updated", {
         call_id: params.callId,
         tools_enabled: toolsEnabled,
-        tool_count: toolsEnabled ? VOICE_TOOLS.length : 0,
+        tool_count: toolsEnabled ? activeTools.length : 0,
       });
 
       // Make the agent speak first — the warm greeting. Without this the agent

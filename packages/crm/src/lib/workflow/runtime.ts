@@ -263,6 +263,15 @@ export async function startRun(
  * loop loses the in-memory step counter but not the run state.
  */
 export async function advanceRun(context: RuntimeContext, runId: string): Promise<void> {
+  const run = await context.storage.getRun(runId);
+  if (run?.archetypeId === "aurix-roofing-v1") {
+    const { withAurixRunLease } = await import("@/lib/aurix/execution");
+    return withAurixRunLease(runId, () => advanceRunUnlocked(context, runId));
+  }
+  return advanceRunUnlocked(context, runId);
+}
+
+async function advanceRunUnlocked(context: RuntimeContext, runId: string): Promise<void> {
   let guard = 0;
   const maxIterations = 1024; // safety ceiling — production runs rarely chain > ~50 steps
 

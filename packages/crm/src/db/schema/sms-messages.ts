@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { desc } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { contacts } from "./contacts";
 import { organizations } from "./organizations";
 import { users } from "./users";
@@ -29,6 +29,12 @@ export const smsMessages = pgTable(
     sentAt: timestamp("sent_at", { withTimezone: true }),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    inboundProcessingStatus: text("inbound_processing_status"),
+    inboundProcessingAttempts: integer("inbound_processing_attempts").notNull().default(0),
+    inboundProcessingStartedAt: timestamp("inbound_processing_started_at", { withTimezone: true }),
+    inboundNextAttemptAt: timestamp("inbound_next_attempt_at", { withTimezone: true }),
+    inboundProcessedAt: timestamp("inbound_processed_at", { withTimezone: true }),
+    inboundProcessingError: text("inbound_processing_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     readAt: timestamp("read_at", { withTimezone: true }),
@@ -39,5 +45,12 @@ export const smsMessages = pgTable(
     index("sms_messages_org_status_idx").on(table.orgId, table.status),
     index("sms_messages_org_direction_idx").on(table.orgId, table.direction),
     index("sms_messages_org_contact_read_idx").on(table.orgId, table.contactId, table.readAt),
+    uniqueIndex("sms_messages_provider_external_uidx").on(table.provider, table.externalMessageId),
+    index("sms_messages_inbound_processing_idx").on(
+      table.direction,
+      table.inboundProcessingStatus,
+      table.inboundNextAttemptAt,
+      table.createdAt,
+    ),
   ]
 );

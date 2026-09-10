@@ -78,6 +78,9 @@ export async function sendSmsFromApi(params: {
     throw new Error("toNumber is required");
   }
 
+  const { managedSmsGuard } = await import("@/lib/aurix/sms-hold");
+  const managedHold = await managedSmsGuard(params.orgId, params.contactId, toNumber);
+  if (managedHold) return { smsId: null, contactId: params.contactId, suppressed: true, reason: managedHold };
   const suppression = await isPhoneSuppressed(params.orgId, toNumber);
   if (suppression) {
     await emitSeldonEvent("sms.suppressed", {
@@ -166,8 +169,6 @@ export async function sendSmsFromApi(params: {
       await emitSeldonEvent("sms.sent", {
         smsMessageId: created.id,
         contactId: created.contactId,
-        // SLICE 8 G-8-5: tag test-mode events for observability
-        // (workflow_event_log + /agents/runs distinction).
         ...(isTestMode ? { testMode: true } : {}),
       }, { orgId: params.orgId });
     }
@@ -279,8 +280,9 @@ export async function listRecentSms(orgId: string, limit = 50) {
     .limit(limit);
 }
 
-// Invoked from the inbound Twilio webhook (4.f) — persists an inbound
-// row and hands off to the conversation runtime for reply generation.
+// Invoked from provider webhooks. The provider message id is the durable
+// receipt identity: a Twilio retry returns the existing row instead of
+// creating a second inbound message.
 export async function persistInboundSms(params: {
   orgId: string;
   contactId: string | null;
@@ -289,8 +291,9 @@ export async function persistInboundSms(params: {
   body: string;
   externalMessageId: string;
   metadata?: Record<string, unknown>;
+  processingStatus?: "pending" | "processed" | null;
 }) {
-  const [row] = await db
+  const [created] = await db
     .insert(smsMessages)
     .values({
       orgId: params.orgId,
@@ -305,23 +308,39 @@ export async function persistInboundSms(params: {
       externalMessageId: params.externalMessageId,
       segments: 1,
       metadata: params.metadata ?? {},
+      inboundProcessingStatus: params.processingStatus ?? null,
+      inboundNextAttemptAt: params.processingStatus === "pending" ? new Date() : null,
+      inboundProcessedAt: params.processingStatus === "processed" ? new Date() : null,
+    })
+    .onConflictDoNothing({
+      target: [smsMessages.provider, smsMessages.externalMessageId],
     })
     .returning({ id: smsMessages.id });
 
-  if (!row) {
+  if (created) return { ...created, inserted: true as const };
+
+  const [existing] = await db
+    .select({ id: smsMessages.id })
+    .from(smsMessages)
+    .where(
+      and(
+        eq(smsMessages.provider, "twilio"),
+        eq(smsMessages.externalMessageId, params.externalMessageId),
+      ),
+    )
+    .limit(1);
+
+  if (!existing) {
     throw new Error("Could not persist inbound sms");
   }
 
-  return row;
+  return { ...existing, inserted: false as const };
 }
 
 export async function findContactByPhone(orgId: string, phone: string) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
 
-  // Contacts store phone in whatever format the user typed. Normalize
-  // the column in the query via a filter pass; at v1 scale a table scan
-  // is fine. Index on phone can land later if needed.
   const rows = await db
     .select({ id: contacts.id, phone: contacts.phone })
     .from(contacts)
