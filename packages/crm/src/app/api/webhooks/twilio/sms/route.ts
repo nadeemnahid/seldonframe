@@ -98,6 +98,19 @@ function messagingTwimlResponse() {
   });
 }
 
+/**
+ * Twilio's Try out SMS Trial path does not support direct TwiML XML in the
+ * webhook response. Staging can opt into a 204 acknowledgement after the
+ * request has been authenticated and any required durable receipt/compliance
+ * work has completed. Normal/production behavior remains TwiML by default.
+ */
+function messagingInboundAckResponse() {
+  if (process.env.TWILIO_TRIAL_SMS_NO_CONTENT_ACK_ENABLED === "true") {
+    return new NextResponse(null, { status: 204 });
+  }
+  return messagingTwimlResponse();
+}
+
 async function handleStatusCallback(params: {
   orgId: string;
   externalMessageId: string;
@@ -264,7 +277,7 @@ export async function POST(request: Request) {
   }
 
   const inboundBody = body.Body?.trim() ?? "";
-  if (!inboundBody) return messagingTwimlResponse();
+  if (!inboundBody) return messagingInboundAckResponse();
 
   // Compliance-sensitive preference transitions remain synchronous. They must
   // complete before Twilio is acknowledged so no post-STOP work can race ahead.
@@ -280,7 +293,7 @@ export async function POST(request: Request) {
       { phone: fromNumber, reason: "stop_keyword", contactId: null },
       { orgId },
     );
-    return messagingTwimlResponse();
+    return messagingInboundAckResponse();
   }
 
   if (["START", "UNSTOP"].includes(inboundBody.toUpperCase())) {
@@ -296,11 +309,11 @@ export async function POST(request: Request) {
           authToken,
         },
       );
-      if (handled) return messagingTwimlResponse();
+      if (handled) return messagingInboundAckResponse();
     } catch (error) {
       const code = error instanceof Error ? error.message : "";
       if (/invalid.*consent|stale_consent|invalid_provider_identity/.test(code)) {
-        return messagingTwimlResponse();
+        return messagingInboundAckResponse();
       }
       return NextResponse.json(
         { error: "consent_verification_unavailable" },
@@ -324,7 +337,7 @@ export async function POST(request: Request) {
         error: error instanceof Error ? error.message : String(error),
       });
     });
-    return messagingTwimlResponse();
+    return messagingInboundAckResponse();
   }
 
   // Durable receipt first. The provider-wide unique identity means a Twilio
@@ -340,7 +353,7 @@ export async function POST(request: Request) {
     processingStatus: "pending",
   });
 
-  // Heavy workflow/event/agent work happens after the TwiML response. The
+  // Heavy workflow/event/agent work happens after the provider response. The
   // one-minute recovery sweep reclaims pending or stale-processing receipts if
   // this process exits before after() completes.
   after(async () => {
@@ -354,5 +367,5 @@ export async function POST(request: Request) {
     }
   });
 
-  return messagingTwimlResponse();
+  return messagingInboundAckResponse();
 }
