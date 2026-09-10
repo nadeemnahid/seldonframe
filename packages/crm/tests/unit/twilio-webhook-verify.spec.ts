@@ -2,7 +2,10 @@ import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
-import { verifyTwilioSignature } from "@/lib/sms/webhook-verify";
+import {
+  verifyTwilioSignature,
+  verifyUnsignedTwilioTrialVoiceRequest,
+} from "@/lib/sms/webhook-verify";
 
 const originalBase = process.env.TWILIO_WEBHOOK_BASE_URL;
 
@@ -98,6 +101,87 @@ test("Twilio signature verification rejects an invalid signature", () => {
       body,
       signature: "not-a-valid-signature",
       authToken: "test-auth-token",
+    }),
+    false,
+  );
+});
+
+test("unsigned Twilio trial fallback authenticates the exact recent inbound CallSid", async () => {
+  const accountSid = "AC11111111111111111111111111111111";
+  const callSid = "CA55555555555555555555555555555555";
+  const now = new Date("2026-09-10T08:00:00Z");
+  const fetchImpl = async () =>
+    new Response(
+      JSON.stringify({
+        sid: callSid,
+        account_sid: accountSid,
+        direction: "inbound",
+        from: "+919999999999",
+        to: "+15555550123",
+        date_created: "Thu, 10 Sep 2026 07:59:30 +0000",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  assert.equal(
+    await verifyUnsignedTwilioTrialVoiceRequest({
+      enabled: true,
+      accountSid,
+      authToken: "primary-auth-token",
+      callSid,
+      bodyAccountSid: accountSid,
+      from: "+919999999999",
+      to: "+15555550123",
+      now,
+      fetchImpl,
+    }),
+    true,
+  );
+});
+
+test("unsigned Twilio trial fallback is disabled by default", async () => {
+  assert.equal(
+    await verifyUnsignedTwilioTrialVoiceRequest({
+      enabled: false,
+      accountSid: "AC11111111111111111111111111111111",
+      authToken: "primary-auth-token",
+      callSid: "CA55555555555555555555555555555555",
+      bodyAccountSid: "AC11111111111111111111111111111111",
+      from: "+919999999999",
+      to: "+15555550123",
+      fetchImpl: async () => new Response("{}", { status: 200 }),
+    }),
+    false,
+  );
+});
+
+test("unsigned Twilio trial fallback rejects a mismatched caller", async () => {
+  const accountSid = "AC11111111111111111111111111111111";
+  const callSid = "CA55555555555555555555555555555555";
+  const fetchImpl = async () =>
+    new Response(
+      JSON.stringify({
+        sid: callSid,
+        account_sid: accountSid,
+        direction: "inbound",
+        from: "+918888888888",
+        to: "+15555550123",
+        date_created: "Thu, 10 Sep 2026 07:59:30 +0000",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  assert.equal(
+    await verifyUnsignedTwilioTrialVoiceRequest({
+      enabled: true,
+      accountSid,
+      authToken: "primary-auth-token",
+      callSid,
+      bodyAccountSid: accountSid,
+      from: "+919999999999",
+      to: "+15555550123",
+      now: new Date("2026-09-10T08:00:00Z"),
+      fetchImpl,
     }),
     false,
   );
