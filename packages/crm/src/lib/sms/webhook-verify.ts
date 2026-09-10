@@ -103,23 +103,27 @@ export function verifyTwilioSignature(params: {
   });
 }
 
-// Twilio's Trial "Try out Voice" inbound interceptor can fetch custom TwiML
+// Twilio Trial's "Try out Voice" inbound interceptor can fetch custom TwiML
 // without forwarding X-Twilio-Signature. This fallback is deliberately
 // separate from normal signature validation and must be explicitly enabled by
 // the caller (staging only). It authenticates the exact CallSid server-to-
-// server against Twilio's REST API and checks the immutable call identity.
+// server against Twilio's REST API and is limited to the initial inbound
+// ringing fetch; unsigned terminal callbacks remain fail-closed.
 export async function verifyUnsignedTwilioTrialVoiceRequest(params: {
   enabled: boolean;
   accountSid: string;
   authToken: string;
   callSid: string;
   bodyAccountSid: string;
+  callStatus: string;
+  direction: string;
   from: string;
   to: string;
   now?: Date;
   fetchImpl?: typeof fetch;
 }) {
   if (!params.enabled) return false;
+  if (params.callStatus !== "ringing" || params.direction !== "inbound") return false;
   if (!/^AC[0-9A-Fa-f]{32}$/.test(params.accountSid)) return false;
   if (!/^CA[0-9A-Fa-f]{32}$/.test(params.callSid)) return false;
   if (!params.authToken || params.bodyAccountSid !== params.accountSid) return false;
