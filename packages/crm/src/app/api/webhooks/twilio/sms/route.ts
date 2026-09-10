@@ -102,11 +102,16 @@ function messagingTwimlResponse() {
  * Twilio's Try out SMS Trial path does not support direct TwiML XML in the
  * webhook response. Staging can opt into a 204 acknowledgement after the
  * request has been authenticated and any required durable receipt/compliance
- * work has completed. Normal/production behavior remains TwiML by default.
+ * work has completed. Twilio still requires a supported Content-Type header
+ * on webhook responses, so the empty 204 explicitly advertises text/xml while
+ * carrying no TwiML body. Normal/production behavior remains TwiML by default.
  */
 function messagingInboundAckResponse() {
   if (process.env.TWILIO_TRIAL_SMS_NO_CONTENT_ACK_ENABLED === "true") {
-    return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, {
+      status: 204,
+      headers: { "Content-Type": "text/xml; charset=utf-8" },
+    });
   }
   return messagingTwimlResponse();
 }
