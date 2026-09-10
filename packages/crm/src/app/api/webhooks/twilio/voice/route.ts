@@ -135,6 +135,7 @@ export async function POST(request: Request) {
   const callStatus = body.CallStatus?.trim() ?? "";
   const fromRaw = body.From?.trim() ?? "";
   const toRaw = body.To?.trim() ?? "";
+  const direction = body.Direction?.trim() ?? "";
   const durationSeconds = Number.parseInt(body.CallDuration ?? "0", 10) || 0;
 
   if (!callSid) {
@@ -193,6 +194,8 @@ export async function POST(request: Request) {
       authToken,
       callSid,
       bodyAccountSid: body.AccountSid?.trim() ?? "",
+      callStatus,
+      direction,
       from: fromRaw,
       to: toRaw,
     });
