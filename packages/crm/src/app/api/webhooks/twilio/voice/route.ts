@@ -116,6 +116,13 @@ function fullRequestUrl(request: Request) {
 const EMPTY_TWIML_RESPONSE =
   '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
+// Audible staging-only proof for Twilio Trial's custom-TwiML interceptor.
+// The Trial path has a hard 5-second TwiML fetch deadline, so after the
+// unsigned CallSid has been authenticated against Twilio REST we must return
+// immediately instead of running the normal downstream CRM/event path first.
+const TRIAL_FASTPATH_TWIML_RESPONSE =
+  '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Seldon staging voice test successful.</Say><Hangup/></Response>';
+
 function twimlResponse(xml: string) {
   return new NextResponse(xml, {
     status: 200,
@@ -178,6 +185,7 @@ export async function POST(request: Request) {
     signature,
     authToken,
   });
+  let trialRestVerified = false;
 
   // Twilio Trial's "Try out Voice" inbound interceptor can omit the normal
   // X-Twilio-Signature header when proxying a custom TwiML URL. Never accept
@@ -199,6 +207,7 @@ export async function POST(request: Request) {
       from: fromRaw,
       to: toRaw,
     });
+    trialRestVerified = authenticated;
 
     if (authenticated) {
       logEvent("twilio_voice_webhook_trial_rest_verified", {
@@ -240,6 +249,14 @@ export async function POST(request: Request) {
       parameter_names: diagnostic.parameterNames.join(","),
     });
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  if (trialRestVerified) {
+    logEvent("twilio_voice_webhook_trial_fastpath", {
+      org_id: orgId,
+      call_sid: callSid,
+    });
+    return twimlResponse(TRIAL_FASTPATH_TWIML_RESPONSE);
   }
 
   const { managedMissedCall } = await import("@/lib/aurix/voice");
