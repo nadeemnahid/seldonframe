@@ -1,15 +1,6 @@
 import crypto from "node:crypto";
 import { parse as parseQuery, stringify as stringifyQuery } from "node:querystring";
 
-// Twilio signs form webhooks with HMAC-SHA1 over the exact public request URL
-// followed by alphabetically sorted form parameters. Its official Node helper
-// deliberately validates URL variants with and without the standard port
-// because Twilio's signing backend is not fully consistent about :443/:80.
-//
-// In production-like deployments Seldon can sit behind a reverse proxy or
-// tunnel whose internal request origin is different from the URL configured
-// in Twilio. TWILIO_WEBHOOK_BASE_URL pins verification to that trusted public
-// origin rather than trusting proxy-supplied host headers.
 function pinnedSignatureUrl(requestUrl: string): string | null {
   const configuredBase = process.env.TWILIO_WEBHOOK_BASE_URL?.trim();
   if (!configuredBase) return requestUrl;
@@ -19,9 +10,6 @@ function pinnedSignatureUrl(requestUrl: string): string | null {
     const base = new URL(configuredBase);
     if (base.protocol !== "https:" && base.protocol !== "http:") return null;
     if (base.username || base.password || base.search || base.hash) return null;
-
-    // configuredBase is an origin-only trust anchor. Preserve the exact route
-    // path/query delivered to Seldon, but never trust the incoming host.
     return `${base.protocol}//${base.host}${incoming.pathname}${incoming.search}`;
   } catch {
     return null;
@@ -54,8 +42,6 @@ function removePort(url: URL) {
 }
 
 function addStandardPort(url: URL) {
-  // WHATWG URL parsing strips explicit default ports, so construct this string
-  // manually when no non-standard port survives parsing.
   if (url.port) return url.toString();
   const port = url.protocol === "https:" ? ":443" : ":80";
   return `${url.protocol}//${url.hostname}${port}${url.pathname}${url.search}${url.hash}`;
@@ -78,10 +64,6 @@ function candidateSignatureUrls(requestUrl: string): string[] {
     const parsed = new URL(pinned);
     const withoutPort = removePort(parsed);
     const withPort = addStandardPort(parsed);
-
-    // Match the official Twilio Node validation posture: with/without standard
-    // port and with/without legacy query-string serialization. De-duplicate so
-    // the common no-query case stays tiny.
     return [...new Set([
       withoutPort,
       withPort,
@@ -121,10 +103,62 @@ export function verifyTwilioSignature(params: {
   });
 }
 
-// Rejection-only diagnostics. This never weakens verification and never returns
-// a signature, token, URL parameter value, or request-body value. It exists so
-// staging can distinguish an exact-path mismatch from a different Twilio
-// signing key / trial delivery layer without logging credentials or caller PII.
+// Twilio's Trial "Try out Voice" inbound interceptor can fetch custom TwiML
+// without forwarding X-Twilio-Signature. This fallback is deliberately
+// separate from normal signature validation and must be explicitly enabled by
+// the caller (staging only). It authenticates the exact CallSid server-to-
+// server against Twilio's REST API and checks the immutable call identity.
+export async function verifyUnsignedTwilioTrialVoiceRequest(params: {
+  enabled: boolean;
+  accountSid: string;
+  authToken: string;
+  callSid: string;
+  bodyAccountSid: string;
+  from: string;
+  to: string;
+  now?: Date;
+  fetchImpl?: typeof fetch;
+}) {
+  if (!params.enabled) return false;
+  if (!/^AC[0-9A-Fa-f]{32}$/.test(params.accountSid)) return false;
+  if (!/^CA[0-9A-Fa-f]{32}$/.test(params.callSid)) return false;
+  if (!params.authToken || params.bodyAccountSid !== params.accountSid) return false;
+
+  const fetchImpl = params.fetchImpl ?? fetch;
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(params.accountSid)}/Calls/${encodeURIComponent(params.callSid)}.json`;
+  const authorization = Buffer.from(`${params.accountSid}:${params.authToken}`, "utf-8").toString("base64");
+
+  try {
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Basic ${authorization}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    });
+    if (!response.ok) return false;
+
+    const call = (await response.json()) as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+    if (text(call.sid) !== params.callSid) return false;
+    if (text(call.account_sid) !== params.accountSid) return false;
+    if (text(call.direction) !== "inbound") return false;
+    if (text(call.from) !== params.from.trim()) return false;
+    if (text(call.to) !== params.to.trim()) return false;
+
+    const createdAt = Date.parse(text(call.date_created));
+    if (!Number.isFinite(createdAt)) return false;
+    const now = (params.now ?? new Date()).getTime();
+    const ageMs = now - createdAt;
+    if (ageMs < -60_000 || ageMs > 10 * 60_000) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function diagnoseTwilioSignature(params: {
   url: string;
   body: URLSearchParams;
