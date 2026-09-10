@@ -12,39 +12,6 @@
 //       synthesis fills into $textBackBody)
 //   When Claude / GPT / Gemini get better, the synthesized copy gets
 //   better. This file doesn't need to change.
-//
-// What this route does:
-//   1. Accept Twilio Voice status-callback POSTs.
-//   2. Resolve the workspace via the To-number (or From, for the
-//      initial voice-URL hit).
-//   3. Verify Twilio signature against the workspace's auth token.
-//   4. If the CallStatus is one of the missed-call terminal states
-//      (no-answer / busy / failed) → emit `call.missed` event.
-//   5. Return empty TwiML for the initial voice-URL hit so Twilio
-//      hangs up cleanly (no awkward dead-air); return JSON 200 for
-//      status callbacks.
-//
-// What this route does NOT do:
-//   - Send any SMS itself (archetype runtime handles that)
-//   - Play voicemail / IVR / voice-agent flows (those land Q3+ via
-//     the voice-agent infrastructure work)
-//   - Lookup or create the caller's CRM contact (the contact-resolve
-//     runs in the archetype's send_sms step, which already handles
-//     null contact_id)
-//
-// Twilio status-callback nuances we deliberately encode:
-//   - "missed" is the union of no-answer, busy, and failed. NOT
-//     "completed" (which usually means the call connected and the
-//     caller hung up, or hit voicemail and left a recording — both
-//     are "engaged", not missed).
-//   - Status callbacks fire on the call's terminal state by default.
-//     Per-status-change callbacks require `StatusCallbackEvent`
-//     params in the Twilio number config; we don't depend on them.
-//   - Anonymous callers (caller-ID blocked) arrive with From="anonymous"
-//     or empty. We still emit the event with fromNumber="" so the
-//     activity log captures the call, but the archetype's send_sms
-//     step will fail E.164 validation and noop (correct behavior —
-//     can't text back a number we don't have).
 
 import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
@@ -58,6 +25,7 @@ import { toE164 } from "@/lib/sms/providers";
 import {
   diagnoseTwilioSignature,
   verifyTwilioSignature,
+  verifyUnsignedTwilioTrialVoiceRequest,
 } from "@/lib/sms/webhook-verify";
 import { resolveWorkspaceByPhoneNumber } from "@/lib/agents/voice/resolve-workspace-by-number";
 import {
@@ -76,7 +44,7 @@ function isMissedStatus(value: string): value is MissedCallStatus {
   return MISSED_CALL_STATUSES.has(value as MissedCallStatus);
 }
 
-async function loadTwilioAuthTokenForOrg(orgId: string) {
+async function loadTwilioCredentialsForOrg(orgId: string) {
   const [row] = await db
     .select({ integrations: organizations.integrations })
     .from(organizations)
@@ -84,17 +52,23 @@ async function loadTwilioAuthTokenForOrg(orgId: string) {
     .limit(1);
 
   const integrations = (row?.integrations ?? {}) as Record<string, unknown>;
-  const twilio = (integrations.twilio ?? {}) as { authToken?: string };
+  const twilio = (integrations.twilio ?? {}) as {
+    accountSid?: string;
+    authToken?: string;
+  };
+  const accountSid = twilio.accountSid?.trim() ?? "";
   const raw = twilio.authToken?.trim() ?? "";
 
+  let authToken = raw;
   if (raw.startsWith("v1.")) {
     try {
-      return decryptValue(raw);
+      authToken = decryptValue(raw);
     } catch {
-      return "";
+      authToken = "";
     }
   }
-  return raw;
+
+  return { accountSid, authToken };
 }
 
 async function loadGreetingContext(orgId: string): Promise<{
@@ -187,7 +161,7 @@ export async function POST(request: Request) {
       : twimlResponse(EMPTY_TWIML_RESPONSE);
   }
 
-  const authToken = await loadTwilioAuthTokenForOrg(orgId);
+  const { accountSid, authToken } = await loadTwilioCredentialsForOrg(orgId);
   if (!authToken) {
     return NextResponse.json(
       { error: "Twilio signature configuration required" },
@@ -197,13 +171,41 @@ export async function POST(request: Request) {
 
   const signature = request.headers.get("x-twilio-signature");
   const publicRequestUrl = fullRequestUrl(request);
-  const ok = verifyTwilioSignature({
+  let authenticated = verifyTwilioSignature({
     url: publicRequestUrl,
     body: params,
     signature,
     authToken,
   });
-  if (!ok) {
+
+  // Twilio Trial's "Try out Voice" inbound interceptor can omit the normal
+  // X-Twilio-Signature header when proxying a custom TwiML URL. Never accept
+  // that omission on trust: staging may opt into a server-to-server fallback
+  // that verifies this exact CallSid against Twilio's authenticated Calls API.
+  if (
+    !authenticated &&
+    !signature &&
+    process.env.TWILIO_TRIAL_UNSIGNED_VOICE_ENABLED === "true"
+  ) {
+    authenticated = await verifyUnsignedTwilioTrialVoiceRequest({
+      enabled: true,
+      accountSid,
+      authToken,
+      callSid,
+      bodyAccountSid: body.AccountSid?.trim() ?? "",
+      from: fromRaw,
+      to: toRaw,
+    });
+
+    if (authenticated) {
+      logEvent("twilio_voice_webhook_trial_rest_verified", {
+        org_id: orgId,
+        call_sid: callSid,
+      });
+    }
+  }
+
+  if (!authenticated) {
     const diagnostic = diagnoseTwilioSignature({
       url: publicRequestUrl,
       body: params,
