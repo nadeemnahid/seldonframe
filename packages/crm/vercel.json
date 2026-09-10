@@ -24,6 +24,10 @@
       "schedule": "* * * * *"
     },
     {
+      "path": "/api/cron/sms-inbound-process",
+      "schedule": "* * * * *"
+    },
+    {
       "path": "/api/cron/report-contact-usage",
       "schedule": "0 2 * * *"
     },
