@@ -1,22 +1,12 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
-import { NextResponse } from "next/server";
+import { and, eq } from "drizzle-orm";
+import { after, NextResponse } from "next/server";
 import { db } from "@/db";
-import {
-  organizations,
-  smsEvents,
-  smsMessages,
-  workflowRuns,
-  workflowWaits,
-} from "@/db/schema";
+import { organizations, smsEvents, smsMessages } from "@/db/schema";
 import { decryptValue } from "@/lib/encryption";
 import { emitSeldonEvent } from "@/lib/events/bus";
 import { logEvent } from "@/lib/observability/log";
-import { dispatchSmsAutoReply } from "@/lib/agents/channels/sms-auto-reply";
-import {
-  classifyInboundIntent,
-  shouldAutoReplyForIntent,
-} from "@/lib/messaging/classify-intent";
-import { findContactByPhone, persistInboundSms } from "@/lib/sms/api";
+import { persistInboundSms } from "@/lib/sms/api";
+import { processInboundSmsById } from "@/lib/sms/inbound-processing";
 import { toE164 } from "@/lib/sms/providers";
 import {
   addPhoneSuppression,
@@ -24,7 +14,6 @@ import {
   isStopKeyword,
 } from "@/lib/sms/suppression";
 import { verifyTwilioSignature } from "@/lib/sms/webhook-verify";
-import { dispatchTwilioInboundForMessageTriggers } from "@/lib/agents/message-trigger-wiring";
 import type { OrgSoul } from "@/lib/soul/types";
 
 export const runtime = "nodejs";
@@ -105,7 +94,7 @@ const EMPTY_MESSAGING_TWIML_RESPONSE =
 function messagingTwimlResponse() {
   return new NextResponse(EMPTY_MESSAGING_TWIML_RESPONSE, {
     status: 200,
-    headers: { "Content-Type": "text/xml; charset=utf-8" },
+    headers: { "Content-Type": "text/xml" },
   });
 }
 
@@ -277,9 +266,8 @@ export async function POST(request: Request) {
   const inboundBody = body.Body?.trim() ?? "";
   if (!inboundBody) return messagingTwimlResponse();
 
-  const { aurixSchemaReady } = await import("@/lib/aurix/schema-ready");
-  await aurixSchemaReady();
-
+  // Compliance-sensitive preference transitions remain synchronous. They must
+  // complete before Twilio is acknowledged so no post-STOP work can race ahead.
   if (isStopKeyword(inboundBody)) {
     await addPhoneSuppression({
       orgId,
@@ -321,19 +309,6 @@ export async function POST(request: Request) {
     }
   }
 
-  const { managedInbound } = await import("@/lib/aurix/inbound");
-  if (
-    await managedInbound({
-      orgId,
-      fromNumber,
-      toNumber,
-      body: inboundBody,
-      externalMessageId,
-    })
-  ) {
-    return messagingTwimlResponse();
-  }
-
   if (isHelpKeyword(inboundBody)) {
     const reply = await buildHelpReply(orgId);
     const { sendSmsFromApi } = await import("@/lib/sms/api");
@@ -352,104 +327,32 @@ export async function POST(request: Request) {
     return messagingTwimlResponse();
   }
 
-  const contactId = await findContactByPhone(orgId, fromNumber);
-
+  // Durable receipt first. The provider-wide unique identity means a Twilio
+  // retry returns the existing row and never duplicates the inbound message.
   const inbound = await persistInboundSms({
     orgId,
-    contactId,
+    contactId: null,
     fromNumber,
     toNumber,
     body: inboundBody,
     externalMessageId,
     metadata: { twilio: body },
+    processingStatus: "pending",
   });
 
-  let conversationOwnsReply = false;
-  const activeConversationWait = await db
-    .select({
-      id: workflowWaits.id,
-      matchPredicate: workflowWaits.matchPredicate,
-    })
-    .from(workflowWaits)
-    .innerJoin(workflowRuns, eq(workflowWaits.runId, workflowRuns.id))
-    .where(
-      and(
-        eq(workflowRuns.orgId, orgId),
-        eq(workflowWaits.eventType, "sms.replied"),
-        isNull(workflowWaits.resumedAt),
-        sql`(${workflowWaits.matchPredicate}->>'phone' = ${fromNumber}${
-          contactId
-            ? sql` OR ${workflowWaits.matchPredicate}->>'contactId' = ${contactId}`
-            : sql``
-        })`,
-      ),
-    )
-    .limit(1);
-
-  if (activeConversationWait.length > 0) {
-    conversationOwnsReply = true;
-    logEvent("twilio_webhook_skipped_for_conversation", {
-      org_id: orgId,
-      contact_id: contactId,
-      from_phone: fromNumber,
-      wait_id: activeConversationWait[0].id,
-    });
-  }
-
-  if (!conversationOwnsReply) {
-    await dispatchTwilioInboundForMessageTriggers({
-      orgId,
-      from: fromNumber,
-      to: toNumber,
-      body: inboundBody,
-      externalMessageId,
-      receivedAt: new Date(),
-      contactId,
-      conversationId: null,
-    });
-  }
-
-  await emitSeldonEvent(
-    "sms.replied",
-    {
-      smsMessageId: inbound.id,
-      contactId,
-      phone: fromNumber,
-      conversationId: null,
-    },
-    { orgId },
-  );
-
-  if (contactId) {
-    if (conversationOwnsReply) return messagingTwimlResponse();
-
-    const intent = await classifyInboundIntent({ orgId, body: inboundBody });
-    const autoReply = shouldAutoReplyForIntent(intent);
-
-    logEvent("twilio_webhook_intent_classified", {
-      org_id: orgId,
-      contact_id: contactId,
-      intent: intent ?? "unknown",
-      auto_reply: autoReply,
-    });
-
-    if (autoReply) {
-      const outcome = await dispatchSmsAutoReply({
-        orgId,
-        contactId,
-        fromNumber,
-        toNumber,
-        inboundBody,
-        smsMessageId: inbound.id,
-      });
-      logEvent("twilio_webhook_auto_reply", {
+  // Heavy workflow/event/agent work happens after the TwiML response. The
+  // one-minute recovery sweep reclaims pending or stale-processing receipts if
+  // this process exits before after() completes.
+  after(async () => {
+    const result = await processInboundSmsById(inbound.id);
+    if (result.claimed && !result.processed) {
+      logEvent("twilio_inbound_post_response_incomplete", {
         org_id: orgId,
-        contact_id: contactId,
-        path: outcome.path,
-        handled: outcome.handled,
+        sms_message_id: inbound.id,
+        dead: result.dead,
       });
     }
-  }
+  });
 
   return messagingTwimlResponse();
 }
