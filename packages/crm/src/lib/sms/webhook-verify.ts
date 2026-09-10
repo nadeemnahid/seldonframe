@@ -140,6 +140,10 @@ export async function verifyUnsignedTwilioTrialVoiceRequest(params: {
         Accept: "application/json",
       },
       cache: "no-store",
+      // Trial custom TwiML has a hard 5-second fetch deadline. Fail closed
+      // before that deadline rather than allowing a slow REST lookup to make
+      // Twilio time out while waiting for TwiML.
+      signal: AbortSignal.timeout(3000),
     });
     if (!response.ok) return false;
 
