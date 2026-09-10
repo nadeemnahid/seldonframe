@@ -8,16 +8,35 @@ import { aurixSchemaReady } from './schema-ready';
 import { aurixSmsHold } from './sms-hold';
 
 /** Called only after verifying the Twilio signature for the mapped workspace. */
-export async function managedInbound(input: { orgId: string; fromNumber: string; toNumber: string; body: string; externalMessageId: string }) {
+export async function managedInbound(input: {
+  orgId: string;
+  fromNumber: string;
+  toNumber: string;
+  body: string;
+  externalMessageId: string;
+  /** When the webhook already created the durable provider receipt, reuse it
+   * instead of inserting a second sms_messages row. */
+  persistedMessageId?: string;
+}) {
   const hold = await aurixSmsHold(input.orgId, input.fromNumber);
   if (!hold) return false;
-  // Persist before runtime advancement. A duplicate provider delivery never
-  // advances a second turn. Interrupted advances become a visible human hold.
-  const result = await db.execute(sql`INSERT INTO sms_messages(org_id,contact_id,provider,direction,from_number,to_number,body,status,external_message_id,segments,metadata)
-    VALUES(${input.orgId}::uuid,${hold.contactId}::uuid,'twilio','inbound',${input.fromNumber},${input.toNumber},${input.body},'received',${input.externalMessageId},1,
-    ${JSON.stringify({aurix:{human_hold:!hold.runId,ambiguous_identity:hold.ambiguous}})}::jsonb)
-    ON CONFLICT DO NOTHING RETURNING id`);
-  const messageId = result.rows[0]?.id;
+
+  let messageId = input.persistedMessageId ?? null;
+  if (messageId) {
+    await db.execute(sql`UPDATE sms_messages
+      SET contact_id=${hold.contactId}::uuid,
+          metadata=metadata || ${JSON.stringify({ aurix: { human_hold: !hold.runId, ambiguous_identity: hold.ambiguous } })}::jsonb,
+          updated_at=now()
+      WHERE id=${messageId}::uuid AND org_id=${input.orgId}::uuid`);
+  } else {
+    // Legacy/direct callers still get the same provider-idempotent receipt.
+    const result = await db.execute(sql`INSERT INTO sms_messages(org_id,contact_id,provider,direction,from_number,to_number,body,status,external_message_id,segments,metadata)
+      VALUES(${input.orgId}::uuid,${hold.contactId}::uuid,'twilio','inbound',${input.fromNumber},${input.toNumber},${input.body},'received',${input.externalMessageId},1,
+      ${JSON.stringify({aurix:{human_hold:!hold.runId,ambiguous_identity:hold.ambiguous}})}::jsonb)
+      ON CONFLICT DO NOTHING RETURNING id`);
+    messageId = typeof result.rows[0]?.id === 'string' ? result.rows[0].id : null;
+  }
+
   if (!messageId || !hold.runId || !hold.contactId) return true;
   const waits = await db.select().from(workflowWaits).where(and(eq(workflowWaits.runId,hold.runId),eq(workflowWaits.eventType,'sms.replied'),isNull(workflowWaits.resumedAt)));
   if (waits.length !== 1) {
