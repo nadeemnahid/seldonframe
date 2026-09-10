@@ -55,7 +55,10 @@ import { emitSeldonEvent } from "@/lib/events/bus";
 import { logEvent } from "@/lib/observability/log";
 import { findContactByPhone } from "@/lib/sms/api";
 import { toE164 } from "@/lib/sms/providers";
-import { verifyTwilioSignature } from "@/lib/sms/webhook-verify";
+import {
+  diagnoseTwilioSignature,
+  verifyTwilioSignature,
+} from "@/lib/sms/webhook-verify";
 import { resolveWorkspaceByPhoneNumber } from "@/lib/agents/voice/resolve-workspace-by-number";
 import {
   buildGreetingTwiml,
@@ -65,10 +68,6 @@ import {
 
 export const runtime = "nodejs";
 
-// Twilio CallStatus values that count as "missed" from the agency's
-// perspective. "completed" deliberately excluded — it means the call
-// connected (either answered or rolled to voicemail with a recording).
-// See https://www.twilio.com/docs/voice/api/call-resource#call-status-values
 const MISSED_CALL_STATUSES = new Set(["no-answer", "busy", "failed"] as const);
 
 type MissedCallStatus = "no-answer" | "busy" | "failed";
@@ -77,8 +76,6 @@ function isMissedStatus(value: string): value is MissedCallStatus {
   return MISSED_CALL_STATUSES.has(value as MissedCallStatus);
 }
 
-// Same auth-token-loading pattern as the SMS webhook. v1.* prefix
-// signals an encrypted value; everything else is treated as plain.
 async function loadTwilioAuthTokenForOrg(orgId: string) {
   const [row] = await db
     .select({ integrations: organizations.integrations })
@@ -100,9 +97,6 @@ async function loadTwilioAuthTokenForOrg(orgId: string) {
   return raw;
 }
 
-// 2026-06-10 — Load what the inbound-greeting decision needs: whether the
-// missed-call-text-back agent is deployed for this workspace, plus the
-// business name for the spoken greeting.
 async function loadGreetingContext(orgId: string): Promise<{
   deployedAt: string | null;
   pausedAt: string | null;
@@ -145,17 +139,6 @@ function fullRequestUrl(request: Request) {
   return request.url;
 }
 
-// Minimal TwiML for the initial voice-URL hit. We don't run a voice
-// IVR/agent at v1.46.0 — Twilio's default behavior (or the agency's
-// existing voicemail-style fallback) handles the actual caller
-// experience. Empty <Response/> tells Twilio "do nothing"; the call
-// hangs up immediately and the StatusCallback then fires with
-// CallStatus=no-answer (or busy/failed depending on why the call
-// reached Twilio in the first place).
-//
-// Q3 2026: voice agent infrastructure replaces this empty response
-// with TwiML that connects the call to LiveKit + OpenAI Realtime
-// for live AI answering. Same endpoint, different TwiML.
 const EMPTY_TWIML_RESPONSE =
   '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
@@ -184,12 +167,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing CallSid" }, { status: 400 });
   }
 
-  // For inbound voice calls (the initial voice-URL POST and the
-  // matching status callbacks), To is the agency's Twilio number
-  // and From is the caller. E.164-normalize for org lookup.
-  // Anonymous callers send From="anonymous" or empty — we keep the
-  // raw value for logging but use an empty E.164 for the SMS step,
-  // which will safely noop.
   const fromNumber = fromRaw && fromRaw !== "anonymous" ? toE164(fromRaw) : "";
   const toNumber = toE164(toRaw);
 
@@ -205,53 +182,79 @@ export async function POST(request: Request) {
       from: fromNumber,
       status: callStatus,
     });
-    // Distinguish voice-URL initial hits from status callbacks by
-    // the presence of a terminal CallStatus + CallDuration. Without
-    // a workspace match we still need to return parseable TwiML on
-    // the initial hit so Twilio doesn't 502 the caller.
     return callStatus && callStatus !== "ringing" && callStatus !== "in-progress"
       ? NextResponse.json({ ok: true, matched: false })
       : twimlResponse(EMPTY_TWIML_RESPONSE);
   }
 
-  // Verify Twilio signature against the workspace's auth token.
-  // Posture matches the SMS webhook: enforce when token is present,
-  // skip in dev where the token isn't configured.
   const authToken = await loadTwilioAuthTokenForOrg(orgId);
-  if (!authToken) return NextResponse.json({error:"Twilio signature configuration required"},{status:503});
-  if (authToken) {
-    const signature = request.headers.get("x-twilio-signature");
-    const ok = verifyTwilioSignature({
-      url: fullRequestUrl(request),
+  if (!authToken) {
+    return NextResponse.json(
+      { error: "Twilio signature configuration required" },
+      { status: 503 },
+    );
+  }
+
+  const signature = request.headers.get("x-twilio-signature");
+  const publicRequestUrl = fullRequestUrl(request);
+  const ok = verifyTwilioSignature({
+    url: publicRequestUrl,
+    body: params,
+    signature,
+    authToken,
+  });
+  if (!ok) {
+    const diagnostic = diagnoseTwilioSignature({
+      url: publicRequestUrl,
       body: params,
       signature,
       authToken,
     });
-    if (!ok) {
-      logEvent("twilio_voice_webhook_signature_rejected", {
-        org_id: orgId,
-        call_sid: callSid,
-      });
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+    let requestPath = "unparseable";
+    try {
+      const parsed = new URL(publicRequestUrl);
+      requestPath = `${parsed.pathname}${parsed.search}`;
+    } catch {
+      // Keep a non-sensitive sentinel instead of logging raw input.
     }
+
+    logEvent("twilio_voice_webhook_signature_rejected", {
+      org_id: orgId,
+      call_sid: callSid,
+      signature_present: diagnostic.signaturePresent,
+      signature_key_sid_present: Boolean(
+        request.headers.get("x-twilio-signature-key-sid"),
+      ),
+      exact_path_match: diagnostic.exactPathMatch,
+      toggled_trailing_slash_match: diagnostic.toggledTrailingSlashMatch,
+      request_path: requestPath,
+      content_type: request.headers.get("content-type") ?? "",
+      forwarded_proto: request.headers.get("x-forwarded-proto") ?? "",
+      forwarded_host: request.headers.get("x-forwarded-host") ?? "",
+      host: request.headers.get("host") ?? "",
+      parameter_names: diagnostic.parameterNames.join(","),
+    });
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
   const { managedMissedCall } = await import("@/lib/aurix/voice");
-  const managedCall = await managedMissedCall(orgId, fromNumber, callSid, ["no-answer", "busy", "failed"].includes(callStatus));
-  if (managedCall) return callStatus && callStatus !== "ringing" && callStatus !== "in-progress"
-    ? NextResponse.json({ok:true,handled_by:"aurix"}) : twimlResponse(EMPTY_TWIML_RESPONSE);
+  const managedCall = await managedMissedCall(
+    orgId,
+    fromNumber,
+    callSid,
+    ["no-answer", "busy", "failed"].includes(callStatus),
+  );
+  if (managedCall) {
+    return callStatus && callStatus !== "ringing" && callStatus !== "in-progress"
+      ? NextResponse.json({ ok: true, handled_by: "aurix" })
+      : twimlResponse(EMPTY_TWIML_RESPONSE);
+  }
 
-  // 2026-06-10 — Inbound greeting decision, shared by the voice-URL hit and
-  // the status callback. When the missed-call agent is deployed we answer +
-  // emit on the inbound hit, so the status callback must not double-emit.
   const greetCtx = await loadGreetingContext(orgId);
   const greetMode = shouldGreetOnInbound(greetCtx.deployedAt, greetCtx.pausedAt);
 
-  // Initial voice-URL hit (no terminal status).
   if (!callStatus || callStatus === "ringing" || callStatus === "in-progress") {
     if (greetMode) {
-      // Deterministic path: answer with a branded greeting and fire the
-      // text-back NOW — don't wait for Twilio to classify a "missed" status.
       const contactId = fromNumber
         ? await findContactByPhone(orgId, fromNumber)
         : null;
@@ -279,8 +282,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Legacy path: empty TwiML; rely on the status callback to detect a
-    // missed call (when no missed-call agent is deployed).
     logEvent("twilio_voice_webhook_voice_url_hit", {
       org_id: orgId,
       call_sid: callSid,
@@ -290,12 +291,7 @@ export async function POST(request: Request) {
     return twimlResponse(EMPTY_TWIML_RESPONSE);
   }
 
-  // Status callback path — terminal state reached.
   if (isMissedStatus(callStatus)) {
-    // When greet-mode is on, the inbound voice-URL hit already emitted
-    // call.missed and answered the call. Skip here so a caller who hangs up
-    // mid-greeting (which can surface a no-answer callback) doesn't trigger
-    // a SECOND text-back.
     if (greetMode) {
       logEvent("twilio_voice_webhook_missed_skipped_greeted", {
         org_id: orgId,
@@ -305,7 +301,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true, skipped: "greeted_on_inbound" });
     }
 
-    const contactId = fromNumber ? await findContactByPhone(orgId, fromNumber) : null;
+    const contactId = fromNumber
+      ? await findContactByPhone(orgId, fromNumber)
+      : null;
 
     await emitSeldonEvent(
       "call.missed",
@@ -333,11 +331,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true, emitted: "call.missed" });
   }
 
-  // Non-missed terminal status (completed / canceled). v1.46.0
-  // doesn't fire any agent on these — voicemail / connected calls
-  // are out of scope for this archetype. Q3 2026's voice-agent
-  // infrastructure will emit `call.completed` here when the
-  // workspace has an active voice agent.
   logEvent("twilio_voice_webhook_terminal_non_missed", {
     org_id: orgId,
     call_sid: callSid,
