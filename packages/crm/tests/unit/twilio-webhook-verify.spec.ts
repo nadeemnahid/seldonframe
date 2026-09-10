@@ -106,7 +106,7 @@ test("Twilio signature verification rejects an invalid signature", () => {
   );
 });
 
-test("unsigned Twilio trial fallback authenticates the exact recent inbound CallSid", async () => {
+test("unsigned Twilio trial fallback authenticates the exact recent inbound ringing CallSid", async () => {
   const accountSid = "AC11111111111111111111111111111111";
   const callSid = "CA55555555555555555555555555555555";
   const now = new Date("2026-09-10T08:00:00Z");
@@ -130,6 +130,8 @@ test("unsigned Twilio trial fallback authenticates the exact recent inbound Call
       authToken: "primary-auth-token",
       callSid,
       bodyAccountSid: accountSid,
+      callStatus: "ringing",
+      direction: "inbound",
       from: "+919999999999",
       to: "+15555550123",
       now,
@@ -147,6 +149,8 @@ test("unsigned Twilio trial fallback is disabled by default", async () => {
       authToken: "primary-auth-token",
       callSid: "CA55555555555555555555555555555555",
       bodyAccountSid: "AC11111111111111111111111111111111",
+      callStatus: "ringing",
+      direction: "inbound",
       from: "+919999999999",
       to: "+15555550123",
       fetchImpl: async () => new Response("{}", { status: 200 }),
@@ -178,6 +182,8 @@ test("unsigned Twilio trial fallback rejects a mismatched caller", async () => {
       authToken: "primary-auth-token",
       callSid,
       bodyAccountSid: accountSid,
+      callStatus: "ringing",
+      direction: "inbound",
       from: "+919999999999",
       to: "+15555550123",
       now: new Date("2026-09-10T08:00:00Z"),
@@ -185,4 +191,29 @@ test("unsigned Twilio trial fallback rejects a mismatched caller", async () => {
     }),
     false,
   );
+});
+
+test("unsigned Twilio trial fallback rejects terminal callbacks", async () => {
+  let called = false;
+  const fetchImpl = async () => {
+    called = true;
+    return new Response("{}", { status: 200 });
+  };
+
+  assert.equal(
+    await verifyUnsignedTwilioTrialVoiceRequest({
+      enabled: true,
+      accountSid: "AC11111111111111111111111111111111",
+      authToken: "primary-auth-token",
+      callSid: "CA55555555555555555555555555555555",
+      bodyAccountSid: "AC11111111111111111111111111111111",
+      callStatus: "completed",
+      direction: "inbound",
+      from: "+919999999999",
+      to: "+15555550123",
+      fetchImpl,
+    }),
+    false,
+  );
+  assert.equal(called, false);
 });
