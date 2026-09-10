@@ -93,6 +93,19 @@ function candidateSignatureUrls(requestUrl: string): string[] {
   }
 }
 
+function anyCandidateMatches(params: {
+  url: string;
+  body: URLSearchParams;
+  signature: string;
+  authToken: string;
+}) {
+  for (const url of candidateSignatureUrls(params.url)) {
+    const expected = expectedSignature(params.authToken, url, params.body);
+    if (signaturesEqual(params.signature, expected)) return true;
+  }
+  return false;
+}
+
 export function verifyTwilioSignature(params: {
   url: string;
   body: URLSearchParams;
@@ -100,11 +113,62 @@ export function verifyTwilioSignature(params: {
   authToken: string;
 }) {
   if (!params.signature || !params.authToken) return false;
+  return anyCandidateMatches({
+    url: params.url,
+    body: params.body,
+    signature: params.signature,
+    authToken: params.authToken,
+  });
+}
 
-  for (const url of candidateSignatureUrls(params.url)) {
-    const expected = expectedSignature(params.authToken, url, params.body);
-    if (signaturesEqual(params.signature, expected)) return true;
+// Rejection-only diagnostics. This never weakens verification and never returns
+// a signature, token, URL parameter value, or request-body value. It exists so
+// staging can distinguish an exact-path mismatch from a different Twilio
+// signing key / trial delivery layer without logging credentials or caller PII.
+export function diagnoseTwilioSignature(params: {
+  url: string;
+  body: URLSearchParams;
+  signature: string | null;
+  authToken: string;
+}) {
+  if (!params.signature || !params.authToken) {
+    return {
+      signaturePresent: Boolean(params.signature),
+      exactPathMatch: false,
+      toggledTrailingSlashMatch: false,
+      parameterNames: [...new Set(params.body.keys())].sort(),
+    };
   }
 
-  return false;
+  const exactPathMatch = anyCandidateMatches({
+    url: params.url,
+    body: params.body,
+    signature: params.signature,
+    authToken: params.authToken,
+  });
+
+  let toggledTrailingSlashMatch = false;
+  try {
+    const u = new URL(params.url);
+    if (u.pathname.endsWith("/")) {
+      u.pathname = u.pathname.slice(0, -1) || "/";
+    } else {
+      u.pathname += "/";
+    }
+    toggledTrailingSlashMatch = anyCandidateMatches({
+      url: u.toString(),
+      body: params.body,
+      signature: params.signature,
+      authToken: params.authToken,
+    });
+  } catch {
+    // Keep fail-closed diagnostic defaults.
+  }
+
+  return {
+    signaturePresent: true,
+    exactPathMatch,
+    toggledTrailingSlashMatch,
+    parameterNames: [...new Set(params.body.keys())].sort(),
+  };
 }
