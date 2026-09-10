@@ -21,7 +21,7 @@ function sign(authToken: string, url: string, body: URLSearchParams) {
   for (const key of keys) {
     for (const value of [...new Set(body.getAll(key))].sort()) payload += key + value;
   }
-  return crypto.createHmac("sha1", authToken).update(payload).digest("base64");
+  return crypto.createHmac("sha1", authToken).update(Buffer.from(payload, "utf-8")).digest("base64");
 }
 
 test("Twilio signature verification uses the configured public webhook origin", () => {
@@ -34,6 +34,28 @@ test("Twilio signature verification uses the configured public webhook origin", 
   ]);
   const publicUrl = "https://seldon-staging.aurixcrm.com/api/webhooks/twilio/voice";
   const signature = sign(authToken, publicUrl, body);
+
+  assert.equal(
+    verifyTwilioSignature({
+      url: "http://seldon-staging-app:3200/api/webhooks/twilio/voice",
+      body,
+      signature,
+      authToken,
+    }),
+    true,
+  );
+});
+
+test("Twilio signature verification accepts the official standard-port variant", () => {
+  const authToken = "test-auth-token";
+  const body = new URLSearchParams([
+    ["CallStatus", "ringing"],
+    ["From", "+919999999999"],
+    ["To", "+15555550123"],
+    ["CallSid", "CA44444444444444444444444444444444"],
+  ]);
+  const twilioSignedUrl = "https://seldon-staging.aurixcrm.com:443/api/webhooks/twilio/voice";
+  const signature = sign(authToken, twilioSignedUrl, body);
 
   assert.equal(
     verifyTwilioSignature({
